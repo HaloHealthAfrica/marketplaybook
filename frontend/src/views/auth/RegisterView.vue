@@ -1,0 +1,180 @@
+<template>
+  <div class="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full space-y-8">
+      <div>
+        <div class="flex items-center justify-center mb-6 gap-2 sm:gap-3">
+          <img src="/favicon.svg?v=2" alt="TradeTally Logo" class="h-10 w-10 sm:h-12 sm:w-12 flex-shrink-0" />
+          <span class="text-xl sm:text-2xl md:text-3xl font-bold text-primary-600 dark:text-primary-400 whitespace-nowrap" style="font-family: 'Bebas Neue', Arial, sans-serif; letter-spacing: 0.05em;">DOMINATE WITH DATA</span>
+        </div>
+        <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900 dark:text-white">
+          Create your account
+        </h2>
+        <p class="mt-2 text-center text-sm text-gray-600 dark:text-gray-400">
+          Or
+          <router-link to="/login" class="font-medium text-primary-600 hover:text-primary-500">
+            sign in to existing account
+          </router-link>
+        </p>
+      </div>
+
+      <!-- Registration disabled message -->
+      <div v-if="registrationDisabled" class="rounded-md bg-yellow-50 dark:bg-yellow-900/20 p-4">
+        <div class="text-center">
+          <h3 class="text-lg font-medium text-yellow-800 dark:text-yellow-400 mb-2">
+            Registration Currently Disabled
+          </h3>
+          <p class="text-sm text-yellow-700 dark:text-yellow-300">
+            User registration is currently disabled by the administrator. Please contact an administrator for assistance.
+          </p>
+          <div class="mt-4">
+            <router-link to="/login" class="btn-primary">
+              Sign In Instead
+            </router-link>
+          </div>
+        </div>
+      </div>
+      
+      <form v-if="!registrationDisabled" class="mt-8 space-y-6" @submit.prevent="handleRegister">
+        <div class="space-y-4">
+          <div>
+            <label for="email" class="label">Email address</label>
+            <input
+              id="email"
+              v-model="form.email"
+              name="email"
+              type="email"
+              required
+              class="input"
+              placeholder="john@example.com"
+              @keydown.enter="handleRegister"
+            />
+          </div>
+
+          <div>
+            <label for="password" class="label">Password</label>
+            <input
+              id="password"
+              v-model="form.password"
+              name="password"
+              type="password"
+              required
+              class="input"
+              placeholder="Minimum 8 characters"
+              @keydown.enter="handleRegister"
+            />
+          </div>
+        </div>
+
+        <!-- Marketing Consent Checkbox (only shown when billing is enabled) -->
+        <div v-if="billingEnabled" class="flex items-start">
+          <div class="flex items-center h-5">
+            <input
+              id="marketing_consent"
+              v-model="form.marketing_consent"
+              name="marketing_consent"
+              type="checkbox"
+              class="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700"
+            />
+          </div>
+          <div class="ml-3 text-sm">
+            <label for="marketing_consent" class="text-gray-700 dark:text-gray-300">
+              I agree to receive marketing and promotional emails about TradeTally features, tips, and special offers.
+            </label>
+          </div>
+        </div>
+
+        <div v-if="authStore.error" class="rounded-md bg-red-50 dark:bg-red-900/20 p-4">
+          <p class="text-sm text-red-800 dark:text-red-400">{{ authStore.error }}</p>
+        </div>
+
+        <div>
+          <button
+            type="submit"
+            :disabled="authStore.loading"
+            class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50"
+          >
+            <span v-if="authStore.loading">Creating account...</span>
+            <span v-else>Create account</span>
+          </button>
+        </div>
+        
+      </form>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
+import { useNotification } from '@/composables/useNotification'
+import { useRegistrationMode } from '@/composables/useRegistrationMode'
+
+const authStore = useAuthStore()
+const router = useRouter()
+const route = useRoute()
+const { showError, showSuccess } = useNotification()
+const { registrationConfig, fetchRegistrationConfig } = useRegistrationMode()
+
+const form = ref({
+  email: '',
+  password: '',
+  marketing_consent: false
+})
+
+const registrationDisabled = computed(() => registrationConfig.value?.allowRegistration === false)
+const billingEnabled = computed(() => registrationConfig.value?.billingEnabled === true)
+let redirectTimeoutId = null
+
+onMounted(async () => {
+  // Pre-fill email from query param (from home page quick signup)
+  if (route.query.email) {
+    form.value.email = route.query.email
+  }
+
+  fetchRegistrationConfig().catch((error) => {
+    console.error('Failed to fetch registration config:', error)
+  })
+})
+
+watch(registrationDisabled, (isDisabled) => {
+  if (redirectTimeoutId) {
+    clearTimeout(redirectTimeoutId)
+    redirectTimeoutId = null
+  }
+
+  if (isDisabled) {
+    redirectTimeoutId = setTimeout(() => {
+      router.push('/login')
+    }, 5000)
+  }
+})
+
+onUnmounted(() => {
+  if (redirectTimeoutId) {
+    clearTimeout(redirectTimeoutId)
+  }
+})
+
+async function handleRegister() {
+  try {
+    const response = await authStore.register(form.value)
+
+    // Show success message
+    showSuccess('Registration Successful', response.message)
+    
+    // Check if email verification or admin approval is required
+    if (response.requiresVerification && response.requiresApproval) {
+      router.push({ name: 'login', query: { message: 'Registration successful! Please check your email to verify your account and wait for admin approval.' } })
+    } else if (response.requiresVerification) {
+      router.push({ name: 'login', query: { message: 'Registration successful! Please check your email to verify your account.' } })
+    } else if (response.requiresApproval) {
+      router.push({ name: 'login', query: { message: 'Your account is pending admin approval' } })
+    } else {
+      router.push({ name: 'login', query: { message: 'You can now sign in to your account' } })
+    }
+  } catch (error) {
+    showError('Registration failed', authStore.error)
+  }
+}
+</script>

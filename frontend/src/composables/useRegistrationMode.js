@@ -1,0 +1,91 @@
+import { ref, computed } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+
+const registrationConfig = ref(null)
+let fetchPromise = null
+
+export function useRegistrationMode() {
+  const authStore = useAuthStore()
+
+  const fetchRegistrationConfig = async () => {
+    if (!registrationConfig.value && authStore.registrationConfig) {
+      registrationConfig.value = authStore.registrationConfig
+    }
+
+    if (registrationConfig.value) return registrationConfig.value
+
+    if (!fetchPromise) {
+      fetchPromise = authStore.getRegistrationConfig()
+        .then(config => {
+          registrationConfig.value = config
+          console.log('[REGISTRATION] Config fetched:', {
+            registrationMode: config.registrationMode,
+            billingEnabled: config.billingEnabled,
+            allowRegistration: config.allowRegistration
+          })
+          return config
+        })
+        .catch(error => {
+          console.error('Failed to fetch registration config:', error)
+          registrationConfig.value = {
+            registrationMode: 'open',
+            allowRegistration: true,
+            billingEnabled: false
+          }
+          return registrationConfig.value
+        })
+        .finally(() => {
+          fetchPromise = null
+        })
+    }
+
+    return fetchPromise
+  }
+
+  const isOpenMode = computed(() => {
+    return registrationConfig.value?.registrationMode === 'open'
+  })
+
+  const isClosedMode = computed(() => {
+    return registrationConfig.value?.registrationMode === 'disabled'
+  })
+
+  const isSemiMode = computed(() => {
+    return registrationConfig.value?.registrationMode === 'approval'
+  })
+
+  const allowRegistration = computed(() => {
+    return registrationConfig.value?.allowRegistration === true
+  })
+
+  const isBillingEnabled = computed(() => {
+    const enabled = registrationConfig.value?.billingEnabled === true
+    if (registrationConfig.value) {
+      console.log('[BILLING] Enabled:', enabled, 'billingEnabled value:', registrationConfig.value.billingEnabled)
+    }
+    return enabled
+  })
+
+  const showSEOPages = computed(() => {
+    // Only show SEO pages when billing is enabled (SaaS/public offering)
+    // When billing is disabled (default), hide public pages (private instance)
+    if (!isBillingEnabled.value) {
+      console.log('[SEO PAGES] Hidden - billing disabled (private instance)')
+      return false
+    }
+    // When billing is enabled, show SEO pages (public SaaS offering)
+    console.log('[SEO PAGES] Show: true - billing enabled (public instance)')
+    return true
+  })
+
+  return {
+    registrationConfig,
+    fetchRegistrationConfig,
+    isOpenMode,
+    isClosedMode,
+    isSemiMode,
+    allowRegistration,
+    isBillingEnabled,
+    showSEOPages
+  }
+}

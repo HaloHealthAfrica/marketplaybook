@@ -1,0 +1,2 @@
+-- This file ensures the tradetally database exists
+-- PostgreSQL init scripts only run on first container start

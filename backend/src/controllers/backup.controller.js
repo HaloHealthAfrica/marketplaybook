@@ -1,0 +1,274 @@
+const backupService = require('../services/backup.service');
+const path = require('path');
+const fs = require('fs').promises;
+
+/**
+ * Backup Controller
+ * Handles backup-related requests (admin only)
+ */
+class BackupController {
+  /**
+   * Restore from a backup file
+   * POST /api/admin/backup/restore
+   */
+  async restoreBackup(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { skipUsers, overwriteUsers, clearExisting } = req.body;
+
+      console.log(`[RESTORE] Restore requested by user ${userId}`);
+      console.log(`[RESTORE] Options: skipUsers=${skipUsers}, overwriteUsers=${overwriteUsers}, clearExisting=${clearExisting}`);
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No backup file uploaded' });
+      }
+
+      // Parse the uploaded backup file
+      let backupData;
+      try {
+        const fileContent = req.file.buffer.toString('utf8');
+        backupData = JSON.parse(fileContent);
+      } catch (parseError) {
+        return res.status(400).json({ error: 'Invalid backup file format. Must be valid JSON.' });
+      }
+
+      // Validate backup structure
+      if (!backupData.version || !backupData.tables) {
+        return res.status(400).json({
+          error: 'Invalid backup file structure. Missing version or tables.',
+          hint: 'This appears to be a user export file, not a full site backup. Use Settings > Import for user exports.'
+        });
+      }
+
+      console.log(`[RESTORE] Backup version: ${backupData.version}, Export date: ${backupData.exportDate}`);
+      console.log(`[RESTORE] Tables in backup:`, Object.keys(backupData.tables));
+
+      // Perform the restore
+      const result = await backupService.restoreFromBackup(backupData, {
+        clearExisting: clearExisting === true || clearExisting === 'true',
+        skipUsers: skipUsers === true || skipUsers === 'true',
+        overwriteUsers: overwriteUsers === true || overwriteUsers === 'true'
+      });
+
+      res.json({
+        message: 'Backup restored successfully',
+        ...result
+      });
+    } catch (error) {
+      console.error('[RESTORE] Error restoring backup:', error);
+      res.status(500).json({ error: 'Restore failed', message: error.message });
+    }
+  }
+
+  /**
+   * Create a manual backup
+   * POST /api/admin/backup
+   */
+  async createBackup(req, res, next) {
+    try {
+      const userId = req.user.id;
+
+      console.log(`[BACKUP] Manual backup requested by user ${userId}`);
+
+      const result = await backupService.createFullSiteBackup(userId, 'manual');
+
+      res.json({
+        message: 'Backup created successfully',
+        backup: result.backup,
+        filename: result.filename,
+        size: result.size
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error creating backup:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Get all backups
+   * GET /api/admin/backup
+   */
+  async getBackups(req, res, next) {
+    try {
+      const { type, limit } = req.query;
+
+      const filters = {};
+      if (type) filters.type = type;
+      if (limit) filters.limit = parseInt(limit);
+
+      const backups = await backupService.getBackups(filters);
+
+      res.json({
+        backups,
+        count: backups.length
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error fetching backups:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Download a backup file
+   * GET /api/admin/backup/:id/download
+   */
+  async downloadBackup(req, res, next) {
+    try {
+      const { id } = req.params;
+
+      const backup = await backupService.getBackupById(id);
+
+      if (backup.status !== 'completed') {
+        return res.status(400).json({
+          error: 'Backup is not completed',
+          status: backup.status
+        });
+      }
+
+      // Validate file_path is within the expected backup directory (prevent path traversal)
+      const backupDir = path.resolve(__dirname, '../data/backups');
+      const resolvedPath = path.resolve(backup.file_path);
+      if (!resolvedPath.startsWith(backupDir + path.sep) && resolvedPath !== backupDir) {
+        console.error('[BACKUP] Path traversal attempt detected:', backup.file_path);
+        return res.status(400).json({ error: 'Invalid backup path' });
+      }
+
+      // Check if file exists
+      try {
+        await fs.access(resolvedPath);
+      } catch (error) {
+        return res.status(404).json({
+          error: 'Backup file not found on disk'
+        });
+      }
+
+      // Send file
+      res.download(resolvedPath, backup.filename, (err) => {
+        if (err) {
+          console.error('[BACKUP] Error downloading file:', err);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Error downloading backup file' });
+          }
+        }
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error downloading backup:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Delete a backup
+   * DELETE /api/admin/backup/:id
+   */
+  async deleteBackup(req, res, next) {
+    try {
+      const { id } = req.params;
+
+      const backup = await backupService.getBackupById(id);
+
+      // Validate file_path is within the expected backup directory (prevent path traversal)
+      const backupDir = path.resolve(__dirname, '../data/backups');
+      const resolvedPath = path.resolve(backup.file_path);
+      if (!resolvedPath.startsWith(backupDir + path.sep) && resolvedPath !== backupDir) {
+        console.error('[BACKUP] Path traversal attempt detected:', backup.file_path);
+        return res.status(400).json({ error: 'Invalid backup path' });
+      }
+
+      // Delete file if it exists
+      try {
+        await fs.unlink(resolvedPath);
+      } catch (error) {
+        console.warn('[BACKUP] File not found on disk, continuing with database deletion');
+      }
+
+      // Delete from database
+      const db = require('../config/database');
+      await db.query('DELETE FROM backups WHERE id = $1', [id]);
+
+      res.json({
+        message: 'Backup deleted successfully'
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error deleting backup:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Get backup settings
+   * GET /api/admin/backup/settings
+   */
+  async getSettings(req, res, next) {
+    try {
+      const settings = await backupService.getBackupSettings();
+
+      res.json(settings);
+    } catch (error) {
+      console.error('[BACKUP] Error fetching settings:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Update backup settings
+   * PUT /api/admin/backup/settings
+   */
+  async updateSettings(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { enabled, schedule, retention_days } = req.body;
+
+      // Validate schedule
+      const validSchedules = ['hourly', 'daily', 'weekly', 'monthly'];
+      if (schedule && !validSchedules.includes(schedule)) {
+        return res.status(400).json({
+          error: 'Invalid schedule. Must be one of: hourly, daily, weekly, monthly'
+        });
+      }
+
+      // Validate retention_days
+      if (retention_days && (retention_days < 1 || retention_days > 365)) {
+        return res.status(400).json({
+          error: 'Retention days must be between 1 and 365'
+        });
+      }
+
+      const settings = await backupService.updateBackupSettings(
+        { enabled, schedule, retention_days },
+        userId
+      );
+
+      res.json({
+        message: 'Backup settings updated successfully',
+        settings
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error updating settings:', error);
+      next(error);
+    }
+  }
+
+  /**
+   * Delete old backups
+   * POST /api/admin/backup/cleanup
+   */
+  async cleanupOldBackups(req, res, next) {
+    try {
+      const { days } = req.body;
+      const daysToKeep = days || 30;
+
+      const deletedCount = await backupService.deleteOldBackups(daysToKeep);
+
+      res.json({
+        message: `Deleted ${deletedCount} old backup(s)`,
+        deletedCount
+      });
+    } catch (error) {
+      console.error('[BACKUP] Error cleaning up backups:', error);
+      next(error);
+    }
+  }
+}
+
+module.exports = new BackupController();
